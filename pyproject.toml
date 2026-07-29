@@ -3,7 +3,7 @@
 
 [project]
 name = "trading-skills"
-version = "0.16.0"
+version = "0.16.1"
 
 
 description = "AI-powered market analysis skills and MCP server for stock and options traders"
@@ -17,7 +17,7 @@ dependencies = [
     "numpy>=2.0",
     "pandas-ta>=0.3.14b0",
     "scipy>=1.14",
-    "mcp>=1.25.0",
+    "mcp>=1.25.0,<2.0.0",
     "lxml>=6.0.2",
     "massive>=2.4.0",
     "pandas-market-calendars>=5.3.1.2",
@@ -54,6 +54,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.0.0",
+    "python-dotenv>=1.0",
     "ruff>=0.8",
     "nbconvert>=7.17.0",
     "jupyter>=1.1.1",
