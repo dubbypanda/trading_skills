@@ -36,7 +36,6 @@ from collections import defaultdict
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import yfinance as yf
 from ib_async import IB, Index, Stock
 
 from trading_skills.broker.zero_dte import DEFAULT_BUDGET_FRAC, find_0dte_spreads
@@ -66,15 +65,13 @@ VXN_SYMBOLS = {"NDX", "NDXP", "QQQ", "MNX"}
 DEFAULT_THRESHOLD = {"VIX": 20.0, "VXN": 35.0}
 
 
-def _vol_index_for(symbol: str) -> tuple[str, str]:
-    """Return (ib_symbol, yfinance_ticker) for the vol gauge of `symbol`.
+def _vol_index_for(symbol: str) -> str:
+    """Return the IB symbol of the vol gauge for `symbol`.
 
     NDX/QQQ and friends use VXN (CBOE Nasdaq-100 Volatility Index); everything
     else uses VIX. Both trade as CBOE Index contracts.
     """
-    if symbol.upper() in VXN_SYMBOLS:
-        return "VXN", "^VXN"
-    return "VIX", "^VIX"
+    return "VXN" if symbol.upper() in VXN_SYMBOLS else "VIX"
 
 
 def _ema_series(closes: list[float], period: int) -> list[float | None]:
@@ -88,32 +85,75 @@ def _ema_series(closes: list[float], period: int) -> list[float | None]:
     return result
 
 
-def _vol_fallback(yf_ticker: str) -> float | None:
-    """Prior-day close of the vol index (VIX/VXN) from yfinance — fallback only.
+def _bar_date(bar) -> date:
+    """The calendar date of a historical bar, whether it carries a date or datetime."""
+    raw = bar.date
+    return raw.date() if isinstance(raw, datetime) else raw
 
-    Returns None when no reading can be had. The vol gate is the strategy's only
+
+async def _fetch_vol_index(ib, vol_symbol: str) -> tuple[float | None, float | None]:
+    """Return (intraday, prior_day_close) for the vol index, both from IB.
+
+    Either is None when IB gives no reading. The vol gate is the strategy's only
     "stand down" check, so a stand-in number here would decide a live trade.
     """
+    contract = Index(vol_symbol, "CBOE", "USD")
     try:
-        raw = yf.download(yf_ticker, period="5d", interval="1d", auto_adjust=True, progress=False)
-        if hasattr(raw.columns, "get_level_values"):
-            raw.columns = raw.columns.get_level_values(0)
-        series = raw["Close"].dropna()
-        if series.empty:
-            return None
-        return float(series.iloc[-1])
+        await ib.qualifyContractsAsync(contract)
     except Exception:
-        return None
+        return None, None
+
+    intraday = prior = None
+    try:
+        minute_bars = await ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr="1800 S",
+            barSizeSetting="1 min",
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=2,
+            keepUpToDate=False,
+        )
+        if minute_bars:
+            intraday = float(minute_bars[-1].close)
+    except Exception:
+        pass
+
+    try:
+        daily_bars = await ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr="5 D",
+            barSizeSetting="1 day",
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=2,
+            keepUpToDate=False,
+        )
+        # IB includes today's in-progress bar during RTH; the gate wants the close
+        # of the previous session, so drop anything dated today.
+        today_et = datetime.now(NY).date()
+        settled = [b for b in daily_bars if _bar_date(b) < today_et]
+        if settled:
+            prior = float(settled[-1].close)
+    except Exception:
+        pass
+
+    return intraday, prior
 
 
 async def _fetch_bars(
     symbol: str,
     vol_symbol: str,
-    vol_yf: str,
     port: int,
     client_id: int = 61,
-) -> tuple[list[dict], float | None, str]:
-    """Fetch 30-min RTH bars + live intraday vol index (VIX/VXN), one IB connection."""
+) -> tuple[list[dict], float | None, float | None, str]:
+    """Fetch 30-min RTH bars + both vol-index readings from IB, one connection.
+
+    Returns (bars, vix_intraday, vix_prior, vix_source). Everything comes from
+    IB: one decision must not be assembled from two books.
+    """
     ib = IB()
     try:
         await ib.connectAsync("127.0.0.1", port, clientId=client_id, readonly=True)
@@ -141,29 +181,11 @@ async def _fetch_bars(
             result.append({"dt": dt_utc, "open": b.open, "close": b.close})
         result.sort(key=lambda x: x["dt"])
 
-        # ── Live vol index (VIX/VXN): last 30 min of 1-min bars from IB ───
-        vix_val = _vol_fallback(vol_yf)
-        vix_source = "yfinance-fallback" if vix_val is not None else "unavailable"
-        try:
-            vix_contract = Index(vol_symbol, "CBOE", "USD")
-            await ib.qualifyContractsAsync(vix_contract)
-            vix_bars = await ib.reqHistoricalDataAsync(
-                vix_contract,
-                endDateTime="",
-                durationStr="1800 S",
-                barSizeSetting="1 min",
-                whatToShow="TRADES",
-                useRTH=False,
-                formatDate=2,
-                keepUpToDate=False,
-            )
-            if vix_bars:
-                vix_val = float(vix_bars[-1].close)
-                vix_source = "ib-live"
-        except Exception:
-            pass  # yfinance fallback already set
+        # ── Vol index (VIX/VXN): intraday + prior-day close, both from IB ──
+        vix_intraday, vix_prior = await _fetch_vol_index(ib, vol_symbol)
+        vix_source = "ib" if (vix_intraday is not None or vix_prior is not None) else "unavailable"
 
-        return result, vix_val, vix_source
+        return result, vix_intraday, vix_prior, vix_source
     finally:
         ib.disconnect()
 
@@ -356,15 +378,15 @@ async def run_ema_vix_strategy(
     Returns a dict with success=False and a reason when any gate blocks the trade.
     """
     symbol = symbol.upper()
-    vol_symbol, vol_yf = _vol_index_for(symbol)
+    vol_symbol = _vol_index_for(symbol)
     # Per-index default cutoff (VXN 35 / VIX 20) unless explicitly overridden.
     if vix_threshold is None:
         vix_threshold = DEFAULT_THRESHOLD[vol_symbol]
 
     # ── 1. Fetch bars + live intraday vol index from IB (single connection) ─
     try:
-        bars, vix_intraday, vix_source = await _fetch_bars(
-            symbol, vol_symbol, vol_yf, port=port, client_id=client_id
+        bars, vix_intraday, vix_prior, vix_source = await _fetch_bars(
+            symbol, vol_symbol, port=port, client_id=client_id
         )
     except (ConnectionRefusedError, OSError, TimeoutError, asyncio.TimeoutError) as exc:
         return {
@@ -385,7 +407,6 @@ async def run_ema_vix_strategy(
     # continuity) must be below the threshold. A market recovering from a
     # high-vol close is still fragile — the prior-day gate blocks those days.
     # NDX/QQQ gate on VXN; everything else on VIX.
-    vix_prior = _vol_fallback(vol_yf)
     if vix_intraday is None or vix_prior is None:
         missing = [
             name
