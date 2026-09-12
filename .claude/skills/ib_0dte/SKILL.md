@@ -256,6 +256,34 @@ is naked.
   (`expected_pnl_rv0.85`); if a leg has no IV it falls back to the binary formula.
   - Lower `--rv-ratio` = more credit-hungry (favors richer near-the-cap strikes);
     `1.0` ≈ fair (EV near zero — don't use). It's an assumption, not a guarantee.
+
+### What `--rv-ratio 0.85` actually is
+
+**It is an unvalidated prior, not a measured quantity.** No backtest in this repo
+established 0.85; it has not been fitted to SPX/NDX 0DTE data, and it should not be
+read as one.
+
+The idea behind it is real — the **volatility risk premium**: implied vol tends to
+print above subsequently realized vol, which is why selling premium has an edge at
+all. `0.85` says "assume realized comes in 15% under implied". The direction is
+well documented; *this particular number* is a round guess at the magnitude.
+
+Why that matters when reading the output:
+
+- **The ratio is the edge.** At `--rv-ratio 1.0` expected EV goes to roughly zero.
+  So every positive `ev_total` the tool reports is a restatement of the assumption,
+  not independent evidence that the trade is good. Rank order between candidates is
+  far more trustworthy than the absolute figures.
+- **It is least reliable when it matters most.** The premium compresses or inverts
+  exactly when realized vol spikes — the sessions where a 0DTE credit spread does
+  its real damage. The EV model has no awareness of regime; pair it with the
+  `--gex` read and the `timing.events` warnings rather than trusting it alone.
+
+To see how much of a candidate's EV is the assumption, re-run with
+`--rv-ratio 1.0` and compare. If EV collapses, the edge was the prior.
+
+Treat it as a tunable, and tune it against your own fills — the paper-test report
+(`scripts/report.py`) exists for exactly that.
 - **`--target-delta`** — pin the short leg(s) to a delta (± 0.05) for direct strike
   control, e.g. `--target-delta 0.15`. Still bounded by `--delta`.
 - Candidates are ranked by **total EV**, ties broken toward higher POP.

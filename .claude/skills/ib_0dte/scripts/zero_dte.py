@@ -118,7 +118,9 @@ def main():
         type=float,
         default=0.85,
         help="Realized/implied vol ratio for the expected-P&L EV (default 0.85). Lower "
-        "favors richer near-money credits; 1.0 ~ fair (near-zero EV).",
+        "favors richer near-money credits; 1.0 ~ fair (near-zero EV). The default is an "
+        "unvalidated prior, not a fitted value — re-run at 1.0 to see how much of a "
+        "candidate's EV is the assumption.",
     )
     parser.add_argument(
         "--allow-stale",

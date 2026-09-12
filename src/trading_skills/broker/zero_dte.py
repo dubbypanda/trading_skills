@@ -487,6 +487,11 @@ def build_verticals(
     max_short_delta caps the |delta| of the short leg (a manual risk limit).
     target_delta (± delta_band) restricts the short leg to a delta band.
     rv_ratio sets the realized/implied vol for the expected-P&L EV (None -> binary EV).
+        0.85 is an UNVALIDATED PRIOR, not a fitted value: it asserts realized vol comes
+        in 15% under implied (the volatility risk premium). The direction is well
+        documented; the magnitude is a guess. At rv_ratio 1.0 EV goes to roughly zero,
+        so the ratio *is* the edge every positive EV reports — rank order between
+        candidates is far more trustworthy than the absolute numbers.
     """
     usable = sorted((o for o in options if _tradeable(o)), key=lambda o: o["strike"])
     strategy = "bear_call" if right == "C" else "bull_put"
