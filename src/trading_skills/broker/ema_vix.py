@@ -88,18 +88,22 @@ def _ema_series(closes: list[float], period: int) -> list[float | None]:
     return result
 
 
-def _vol_fallback(yf_ticker: str) -> float:
-    """Prior-day close of the vol index (VIX/VXN) from yfinance — fallback only."""
+def _vol_fallback(yf_ticker: str) -> float | None:
+    """Prior-day close of the vol index (VIX/VXN) from yfinance — fallback only.
+
+    Returns None when no reading can be had. The vol gate is the strategy's only
+    "stand down" check, so a stand-in number here would decide a live trade.
+    """
     try:
         raw = yf.download(yf_ticker, period="5d", interval="1d", auto_adjust=True, progress=False)
         if hasattr(raw.columns, "get_level_values"):
             raw.columns = raw.columns.get_level_values(0)
         series = raw["Close"].dropna()
         if series.empty:
-            return 18.0
+            return None
         return float(series.iloc[-1])
     except Exception:
-        return 18.0
+        return None
 
 
 async def _fetch_bars(
@@ -108,7 +112,7 @@ async def _fetch_bars(
     vol_yf: str,
     port: int,
     client_id: int = 61,
-) -> tuple[list[dict], float, str]:
+) -> tuple[list[dict], float | None, str]:
     """Fetch 30-min RTH bars + live intraday vol index (VIX/VXN), one IB connection."""
     ib = IB()
     try:
@@ -139,7 +143,7 @@ async def _fetch_bars(
 
         # ── Live vol index (VIX/VXN): last 30 min of 1-min bars from IB ───
         vix_val = _vol_fallback(vol_yf)
-        vix_source = "yfinance-fallback"
+        vix_source = "yfinance-fallback" if vix_val is not None else "unavailable"
         try:
             vix_contract = Index(vol_symbol, "CBOE", "USD")
             await ib.qualifyContractsAsync(vix_contract)
@@ -382,6 +386,32 @@ async def run_ema_vix_strategy(
     # high-vol close is still fragile — the prior-day gate blocks those days.
     # NDX/QQQ gate on VXN; everything else on VIX.
     vix_prior = _vol_fallback(vol_yf)
+    if vix_intraday is None or vix_prior is None:
+        missing = [
+            name
+            for name, value in (("intraday", vix_intraday), ("prior-day", vix_prior))
+            if value is None
+        ]
+        return {
+            "success": False,
+            "symbol": symbol,
+            "strategy": "ema_vix",
+            "vol_index": vol_symbol,
+            "vix_intraday": round(vix_intraday, 2) if vix_intraday is not None else None,
+            "vix_prior": round(vix_prior, 2) if vix_prior is not None else None,
+            "vix": None,
+            "vix_source": vix_source,
+            "vix_threshold": vix_threshold,
+            "signal": "VOL-UNAVAILABLE",
+            "spread_type": None,
+            "reason": (
+                f"No {' and '.join(missing)} {vol_symbol} reading — "
+                "cannot clear the vol gate, so no trade"
+            ),
+            "generated_at": generated_at_str(),
+            "data_delay": "real-time",
+        }
+
     vix_val = max(vix_intraday, vix_prior)
     skip_vix = vix_intraday >= vix_threshold or vix_prior >= vix_threshold
     if skip_vix:
