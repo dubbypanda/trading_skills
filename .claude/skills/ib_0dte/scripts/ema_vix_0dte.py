@@ -12,9 +12,8 @@ Signal logic (default — bare EMA cross):
   4. (With --ic-gate) EMA9/EMA21 gap within --ic-threshold% at ref bar → iron_condor.
 
 Two optional confirmation gates (both OFF by default; opt in per run):
-  --rr-gate    Require both the 9:30 ET (13:30 UTC) and 10:00 ET (14:00 UTC)
-               bars to be red before taking a Bear Call (EMA-down). If not
-               confirmed → no trade.
+  --rr-gate    Require today's two most recently closed bars to be red before
+               taking a Bear Call (EMA-down). If not confirmed → no trade.
   --time-gate  Require today's 9:30 ET and 10:00 ET bars to exist (i.e. run at
                10:30 ET or later) and anchor the EMA-cross lookback to the
                10:00 ET bar. Without it, the lookback anchors to the latest
@@ -96,7 +95,7 @@ def main():
     parser.add_argument(
         "--rr-gate",
         action="store_true",
-        help="Require red→red (9:30 + 10:00 ET bars both red) to confirm a Bear "
+        help="Require red→red (today's two most recently closed bars both red) to confirm a Bear "
         "Call on an EMA-down signal (default: off)",
     )
     parser.add_argument(

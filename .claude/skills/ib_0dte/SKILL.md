@@ -79,8 +79,11 @@ Signal logic (default — exits early with `success: false` and a reason on skip
 4. **EMA9 last crossed below EMA21** → `bear_call` (`signal: "EMA-Dn"`)
 
 Optional confirmation gates (both **off** by default):
-- `--rr-gate` — an EMA-down becomes a Bear Call only if **both the 9:30 and 10:00
-  ET bars are red** (`signal: "EMA-Dn+RR"`); otherwise no trade (`"EMA-Dn-no-RR"`).
+- `--rr-gate` — an EMA-down becomes a Bear Call only if **today's two most recently
+  closed bars are both red** (`signal: "EMA-Dn+RR"`); otherwise no trade
+  (`"EMA-Dn-no-RR"`). The confirmation tracks momentum at the moment of the run, so
+  it means the same thing at 10:30 as at 15:00. A bar still in progress cannot
+  confirm anything and is not counted.
 - `--time-gate` — require today's 9:30 + 10:00 ET bars (run at 10:30 ET or later)
   and anchor the EMA-cross lookback to the 10:00 ET bar. Without it the lookback
   anchors to the latest available bar.
