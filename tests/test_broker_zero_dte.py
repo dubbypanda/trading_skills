@@ -3,6 +3,7 @@
 
 import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,11 @@ from trading_skills.broker.zero_dte import (
     resolve_entry_delta,
     resolve_underlying,
 )
+
+
+async def _no_sleep(_seconds):
+    """Collapse the tick-settling waits so tests do not sit idle."""
+    return None
 
 
 def _opt(strike, mid, delta=None, iv=None, right="C"):
@@ -885,3 +891,150 @@ class TestResolveBudget:
         r = resolve_budget(None, cushion, account="U1")
         assert r["budget"] is None
         assert "no margin cushion" in r["error"]
+
+
+# --------------------------------------------------------------------------- #
+# Quote + open-interest fetching
+# --------------------------------------------------------------------------- #
+class _QuoteIB:
+    """Records every market-data subscription so the passes can be counted."""
+
+    def __init__(self, oi=1234, call_oi=None, put_oi=None):
+        self.requests = []  # (conId, genericTickList)
+        self.cancelled = []
+        self.oi = oi
+        self.call_oi = call_oi if call_oi is not None else oi
+        self.put_oi = put_oi if put_oi is not None else oi
+        self.peak = 0
+        self.live = 0
+
+    async def qualifyContractsAsync(self, *contracts):
+        for i, c in enumerate(contracts, 1):
+            c.conId = i
+        return list(contracts)
+
+    def reqMktData(self, contract, genericTickList="", snapshot=False, *a, **kw):
+        self.requests.append((contract.conId, genericTickList))
+        self.live += 1
+        self.peak = max(self.peak, self.live)
+        greeks = SimpleNamespace(delta=-0.1, gamma=0.002, impliedVol=0.17, vega=1.0, theta=-1.0)
+        return SimpleNamespace(
+            contract=contract,
+            bid=1.0,
+            ask=1.1,
+            last=1.05,
+            close=1.05,
+            volume=50,
+            callOpenInterest=self.call_oi,
+            putOpenInterest=self.put_oi,
+            modelGreeks=greeks,
+        )
+
+    def cancelMktData(self, contract):
+        self.live -= 1
+        self.cancelled.append(contract.conId)
+
+
+class TestFetchSideOpenInterest:
+    """Open interest rides along with the quote rather than costing a second pass."""
+
+    def _fetch(self, ib, want_oi):
+        return asyncio.run(
+            zero_dte._fetch_side(
+                ib,
+                "SPX",
+                "20260912",
+                [7600.0, 7610.0],
+                "P",
+                "CBOE",
+                "SPXW",
+                7650.0,
+                0.001,
+                0.04,
+                False,
+                want_oi=want_oi,
+            )
+        )
+
+    def test_open_interest_needs_no_extra_subscription(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        ib = _QuoteIB()
+        legs = self._fetch(ib, want_oi=True)
+        assert len(ib.requests) == 2  # one per contract, not two per contract
+        assert [leg["open_interest"] for leg in legs] == [1234, 1234]
+
+    def test_open_interest_tick_is_requested_on_the_quote(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        ib = _QuoteIB()
+        self._fetch(ib, want_oi=True)
+        assert all("101" in generic for _, generic in ib.requests)
+
+    def test_quotes_and_greeks_still_arrive(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        legs = self._fetch(_QuoteIB(), want_oi=True)
+        assert [leg["bid"] for leg in legs] == [1.0, 1.0]
+        assert all(leg["delta"] is not None and leg["iv"] is not None for leg in legs)
+
+    def test_subscriptions_are_cancelled(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        ib = _QuoteIB()
+        self._fetch(ib, want_oi=True)
+        assert sorted(ib.cancelled) == [1, 2]
+
+    def test_without_oi_the_tick_is_not_requested(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        ib = _QuoteIB()
+        legs = self._fetch(ib, want_oi=False)
+        assert all(generic == "" for _, generic in ib.requests)
+        assert all(leg["open_interest"] is None for leg in legs)
+
+    def test_reads_the_side_matching_the_right(self, monkeypatch):
+        """Calls take callOpenInterest, puts take putOpenInterest."""
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        ib = _QuoteIB(call_oi=4200, put_oi=3100)
+        assert [leg["open_interest"] for leg in self._fetch(ib, want_oi=True)] == [3100, 3100]
+        calls = asyncio.run(
+            zero_dte._fetch_side(
+                ib,
+                "SPX",
+                "20260912",
+                [7700.0],
+                "C",
+                "CBOE",
+                "SPXW",
+                7650.0,
+                0.001,
+                0.04,
+                False,
+                want_oi=True,
+            )
+        )
+        assert [leg["open_interest"] for leg in calls] == [4200]
+
+    def test_nan_open_interest_is_omitted(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        legs = self._fetch(_QuoteIB(oi=float("nan")), want_oi=True)
+        assert all(leg["open_interest"] is None for leg in legs)
+
+    def test_never_holds_more_than_a_batch_of_lines(self, monkeypatch):
+        monkeypatch.setattr(zero_dte.asyncio, "sleep", _no_sleep)
+        ib = _QuoteIB()
+        strikes = [7000.0 + i for i in range(100)]
+        asyncio.run(
+            zero_dte._fetch_side(
+                ib,
+                "SPX",
+                "20260912",
+                strikes,
+                "P",
+                "CBOE",
+                "SPXW",
+                7650.0,
+                0.001,
+                0.04,
+                False,
+                want_oi=True,
+            )
+        )
+        assert ib.peak <= zero_dte._QUOTE_BATCH
+        assert ib.live == 0  # everything released

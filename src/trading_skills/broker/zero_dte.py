@@ -821,35 +821,7 @@ def _resolve_quote(bid, ask, last, close, g_delta, g_iv, spot, strike, right, T,
     return mid, delta, iv, stale, no_live
 
 
-_OI_BATCH = 20  # concurrent streaming market-data lines to hold at once
 _QUOTE_BATCH = 40  # streaming lines per batch for option bid/ask + greeks
-
-
-async def _fetch_open_interest(ib: IB, qualified: list) -> dict[int, int]:
-    """Open interest by conId, via generic tick 101 (call/put OI).
-
-    Snapshot quotes (reqTickers) never carry OI — it only arrives on a STREAMING
-    subscription with the generic tick requested. Streamed in small batches and
-    cancelled immediately so we never hold many market-data lines (a live account
-    has a limited allowance shared with every other skill).
-    """
-    out: dict[int, int] = {}
-    for i in range(0, len(qualified), _OI_BATCH):
-        batch = qualified[i : i + _OI_BATCH]
-        tickers = [ib.reqMktData(c, genericTickList="101", snapshot=False) for c in batch]
-        try:
-            await asyncio.sleep(3)  # OI ticks arrive asynchronously
-            for t in tickers:
-                if t.contract is None:
-                    continue
-                right = t.contract.right
-                oi = t.callOpenInterest if right == "C" else t.putOpenInterest
-                if oi is not None and not math.isnan(oi) and oi >= 0:
-                    out[t.contract.conId] = int(oi)
-        finally:
-            for c in batch:
-                ib.cancelMktData(c)
-    return out
 
 
 async def _fetch_side(
@@ -895,17 +867,20 @@ async def _fetch_side(
 
     # reqTickersAsync (snapshot) closes the stream before bid/ask + model-greeks arrive
     # for slower strikes (NDX 0DTE, far-OTM). Stream in batches and cancel after reading
-    # so every tick type has time to land — same pattern as _fetch_open_interest.
+    # so every tick type has time to land.
+    # Open interest rides on this same subscription via generic tick 101: a separate
+    # pass would double the market-data lines held against a limited allowance.
+    generic_ticks = "101" if want_oi else ""
     tickers = []
     for i in range(0, len(qualified), _QUOTE_BATCH):
         batch = qualified[i : i + _QUOTE_BATCH]
-        batch_tickers = [ib.reqMktData(c, snapshot=False) for c in batch]
+        batch_tickers = [
+            ib.reqMktData(c, genericTickList=generic_ticks, snapshot=False) for c in batch
+        ]
         await asyncio.sleep(3)
         tickers.extend(batch_tickers)
         for c in batch:
             ib.cancelMktData(c)
-
-    oi_by_conid = await _fetch_open_interest(ib, qualified) if want_oi else {}
 
     results = []
     for t in tickers:
@@ -932,7 +907,11 @@ async def _fetch_side(
         # Size behind the strike, for the GEX profile. IBKR's open interest is the
         # PRIOR settlement's, so on a 0DTE expiry `volume` (today's prints) is the
         # only measure that sees the same-day book — see zero_dte_gex.
-        oi = oi_by_conid.get(t.contract.conId)
+        oi = None
+        if want_oi:
+            raw_oi = t.callOpenInterest if right == "C" else t.putOpenInterest
+            if raw_oi is not None and not math.isnan(raw_oi) and raw_oi >= 0:
+                oi = int(raw_oi)
         volume = t.volume if t.volume is not None and not math.isnan(t.volume) else None
 
         results.append(
