@@ -169,3 +169,87 @@ class TestVolIndexDates:
 
     def test_datetime_narrows_to_date(self):
         assert ema_vix._bar_date(_bar(1.0, datetime(2026, 9, 11, 16, 15))) == date(2026, 9, 11)
+
+
+# --------------------------------------------------------------------------- #
+# rr_gate bar selection
+# --------------------------------------------------------------------------- #
+BAR = timedelta(minutes=30)
+
+
+def _falling_bars(tail, *, now=None):
+    """A declining series (so the EMA cross is down) ending in `tail`.
+
+    `tail` is a list of (open, close) for today's most recent bars, oldest first;
+    the last entry is stamped as the bar currently in progress.
+    """
+    now = now or datetime.now(NY)
+    history = []
+    start = now.astimezone(UTC) - BAR * (60 + len(tail))
+    # Rise then fall, so EMA9 actually crosses back down through EMA21.
+    for i in range(60):
+        price = 100.0 + i if i < 30 else 100.0 + (60 - i) * 2
+        history.append({"dt": start + BAR * i, "open": price, "close": price - 0.5})
+    # Today's tail: the final bar starts now, so its period has not closed yet.
+    first_tail_start = now.astimezone(UTC) - BAR * (len(tail) - 1)
+    for i, (o, c) in enumerate(tail):
+        history.append({"dt": first_tail_start + BAR * i, "open": o, "close": c})
+    return history
+
+
+class TestRrGateUsesRecentBars:
+    """The red->red confirmation must reflect current momentum, not the open."""
+
+    def test_two_most_recent_completed_bars_are_red(self):
+        # ... older ..., red, red, then an in-progress bar that is green.
+        bars = _falling_bars([(100.0, 99.0), (99.0, 98.0), (98.0, 105.0)])
+        spread, signal, reason, _ = ema_vix._detect_signal(bars, rr_gate=True)
+        assert signal == "EMA-Dn+RR"
+        assert spread == "bear_call"
+
+    def test_a_green_recent_bar_blocks_the_bear_call(self):
+        bars = _falling_bars([(100.0, 101.0), (101.0, 100.5), (100.5, 99.0)])
+        spread, signal, reason, _ = ema_vix._detect_signal(bars, rr_gate=True)
+        assert spread is None
+        assert signal == "EMA-Dn-no-RR"
+
+    def test_the_in_progress_bar_is_not_counted(self):
+        """The newest bar's period has not closed, so it cannot confirm anything."""
+        # Two completed red bars, plus an in-progress green one.
+        bars = _falling_bars([(100.0, 99.0), (99.0, 98.0), (98.0, 120.0)])
+        _, signal, _, _ = ema_vix._detect_signal(bars, rr_gate=True)
+        assert signal == "EMA-Dn+RR"
+
+    def test_morning_bars_no_longer_decide_it(self):
+        """9:30 and 10:00 green, but the recent bars are red -> confirmed."""
+        now = datetime.now(NY).replace(hour=15, minute=0, second=0, microsecond=0)
+        bars = _falling_bars([(100.0, 99.0), (99.0, 98.0), (98.0, 97.0)], now=now)
+        morning = now.replace(hour=9, minute=30).astimezone(UTC)
+        bars.insert(0, {"dt": morning, "open": 100.0, "close": 110.0})  # green 9:30
+        bars.insert(1, {"dt": morning + BAR, "open": 110.0, "close": 120.0})  # green 10:00
+        bars.sort(key=lambda b: b["dt"])
+        _, signal, _, _ = ema_vix._detect_signal(bars, rr_gate=True)
+        assert signal == "EMA-Dn+RR"
+
+    def test_too_few_completed_bars_today_is_reported(self):
+        """Early in the session there is nothing closed yet to confirm with."""
+        now = datetime.now(NY)
+        # History lands wholly on earlier days; today holds one in-progress bar.
+        history = []
+        start = (now - timedelta(days=4)).astimezone(UTC)
+        for i in range(60):
+            price = 100.0 + i if i < 30 else 100.0 + (60 - i) * 2
+            history.append({"dt": start + BAR * i, "open": price, "close": price - 0.5})
+        history = [b for b in history if b["dt"].astimezone(NY).date() < now.date()]
+        history.append({"dt": now.astimezone(UTC), "open": 100.0, "close": 99.0})
+
+        spread, signal, reason, _ = ema_vix._detect_signal(history, rr_gate=True)
+        assert spread is None
+        assert signal == "missing-bars-rr"
+        assert "two closed bars" in reason
+
+    def test_rr_gate_off_is_unaffected(self):
+        bars = _falling_bars([(100.0, 101.0), (101.0, 102.0), (102.0, 103.0)])
+        spread, signal, _, _ = ema_vix._detect_signal(bars, rr_gate=False)
+        assert spread == "bear_call"
+        assert signal == "EMA-Dn"

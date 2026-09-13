@@ -13,9 +13,8 @@ Signal logic (default — bare EMA cross):
   4. EMA9 ≈ EMA21 (gap within ic_threshold%) AND ic_gate=True -> iron_condor.
 
 Two optional confirmation gates (both OFF by default):
-  rr_gate    Require both the 9:30 ET (13:30 UTC) and 10:00 ET (14:00 UTC) bars
-             to be red before taking a Bear Call (EMA-down). If not confirmed
-             -> no trade.
+  rr_gate    Require today's two most recently closed bars to be red
+             before taking a Bear Call (EMA-down). If not confirmed -> no trade.
   time_gate  Require today's 9:30 ET and 10:00 ET bars to exist (i.e. run at
              10:30 ET or later) and anchor the EMA-cross lookback to the 10:00
              ET bar. Without it, the lookback anchors to the latest available
@@ -33,7 +32,7 @@ CLI script (ema_vix_0dte.py) and the MCP server.
 
 import asyncio
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ib_async import IB, Index, Stock
@@ -48,6 +47,7 @@ EMA_FAST = 9
 EMA_SLOW = 21
 BAR1_H, BAR1_M = 13, 30  # 9:30 ET
 BAR2_H, BAR2_M = 14, 0  # 10:00 ET
+BAR_SPAN = timedelta(minutes=30)  # the bar size these gates reason about
 
 # Index contracts: symbol -> (exchange, currency)
 INDEX_MAP = {
@@ -209,8 +209,9 @@ def _detect_signal(
     up → bull_put, down → bear_call — anchored to the latest available bar, so
     it runs at any time of day.
 
-    rr_gate=True:   an EMA-down only becomes a Bear Call if BOTH the 9:30 ET and
-                    10:00 ET bars are red (red→red); otherwise no trade.
+    rr_gate=True:   an EMA-down only becomes a Bear Call if today's two most
+                    recently CLOSED bars are both red (red→red); otherwise no
+                    trade. Reads current momentum, whenever the run happens.
     time_gate=True: require today's 9:30 ET and 10:00 ET bars to exist (run at
                     10:30 ET or later) and anchor the EMA-cross lookback to the
                     10:00 ET bar.
@@ -234,6 +235,14 @@ def _detect_signal(
         by_date[b["dt"].astimezone(NY).date()].append(b)
 
     today_bars = by_date.get(today_et, [])
+
+    # Red->red confirmation reads today's two most recently CLOSED bars, so it
+    # reflects momentum at the moment of the run. bar1/bar2 below stay pinned to
+    # 9:30/10:00 because the time gate's job is a fixed morning anchor.
+    now_utc = datetime.now(NY).astimezone(UTC)
+    closed_today = [b for b in today_bars if b["dt"] + BAR_SPAN <= now_utc]
+    rr_bars = closed_today[-2:]
+
     bar1 = next(
         (b for b in today_bars if b["dt"].hour == BAR1_H and b["dt"].minute == BAR1_M), None
     )
@@ -303,32 +312,34 @@ def _detect_signal(
     if not rr_gate:
         return "bear_call", "EMA-Dn", None, ema_gap_pct
 
-    # rr_gate on: need both morning bars present and both red.
-    if not bar1 or not bar2:
+    # rr_gate on: need two closed bars today, and both red.
+    if len(rr_bars) < 2:
         return (
             None,
             "missing-bars-rr",
             (
-                "rr_gate needs today's 9:30 ET and 10:00 ET bars — "
-                f"found bar1={'yes' if bar1 else 'no'}, bar2={'yes' if bar2 else 'no'}. "
-                "Run at 10:30 ET or later."
+                f"rr_gate needs two closed bars today — found {len(rr_bars)}. "
+                "Wait for the session to print another bar."
             ),
             ema_gap_pct,
         )
 
-    b1_red = bar1["close"] < bar1["open"]
-    b2_red = bar2["close"] < bar2["open"]
+    b1, b2 = rr_bars
+    b1_red = b1["close"] < b1["open"]
+    b2_red = b2["close"] < b2["open"]
     if b1_red and b2_red:
         return "bear_call", "EMA-Dn+RR", None, ema_gap_pct
 
     b1_str = "red" if b1_red else "green"
     b2_str = "red" if b2_red else "green"
+    b1_et = b1["dt"].astimezone(NY).strftime("%H:%M")
+    b2_et = b2["dt"].astimezone(NY).strftime("%H:%M")
     return (
         None,
         "EMA-Dn-no-RR",
         (
             f"EMA crossed down but R->R not confirmed "
-            f"(9:30 bar={b1_str}, 10:00 bar={b2_str}) — skip Bear Call"
+            f"({b1_et} bar={b1_str}, {b2_et} bar={b2_str}) — skip Bear Call"
         ),
         ema_gap_pct,
     )
