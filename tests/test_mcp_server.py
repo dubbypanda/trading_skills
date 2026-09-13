@@ -273,19 +273,19 @@ class TestIBTools:
         """NDX/QQQ gate on VXN; other symbols on VIX (unit check, no IB needed)."""
         from trading_skills.broker.ema_vix import _vol_index_for
 
-        assert _vol_index_for("NDX") == ("VXN", "^VXN")
-        assert _vol_index_for("QQQ") == ("VXN", "^VXN")
-        assert _vol_index_for("SPX") == ("VIX", "^VIX")
-        assert _vol_index_for("AAPL") == ("VIX", "^VIX")
+        assert _vol_index_for("NDX") == "VXN"
+        assert _vol_index_for("QQQ") == "VXN"
+        assert _vol_index_for("SPX") == "VIX"
+        assert _vol_index_for("AAPL") == "VIX"
 
     def test_ib_0dte_ema_vix_per_index_default_threshold(self):
         """Default vol cutoff is per-index: VXN 35, VIX 20."""
         from trading_skills.broker.ema_vix import DEFAULT_THRESHOLD, _vol_index_for
 
-        assert DEFAULT_THRESHOLD[_vol_index_for("NDX")[0]] == 35.0
-        assert DEFAULT_THRESHOLD[_vol_index_for("QQQ")[0]] == 35.0
-        assert DEFAULT_THRESHOLD[_vol_index_for("SPX")[0]] == 20.0
-        assert DEFAULT_THRESHOLD[_vol_index_for("SPY")[0]] == 20.0
+        assert DEFAULT_THRESHOLD[_vol_index_for("NDX")] == 35.0
+        assert DEFAULT_THRESHOLD[_vol_index_for("QQQ")] == 35.0
+        assert DEFAULT_THRESHOLD[_vol_index_for("SPX")] == 20.0
+        assert DEFAULT_THRESHOLD[_vol_index_for("SPY")] == 20.0
 
     def test_ib_trades_history_forwards_flex_query_id_list(self):
         """A list of flex_query_ids must be forwarded unchanged so MCP clients

@@ -66,10 +66,17 @@ default cutoff is **per-index — VXN 35, VIX 20** (VXN typically prints several
 points above VIX for the same regime). The index used is echoed as `vol_index` in
 the output; the `vix_*` fields hold that index's readings.
 
+The gate is **dual**: both the intraday reading and the **prior-day close** must
+sit below the cutoff, since a market recovering from a high-vol close is still
+fragile. Both come from IB (`vix_source: "ib"`) — one decision is never assembled
+from two data sources. Without both readings the run stands down rather than
+guessing (`signal: "VOL-UNAVAILABLE"`).
+
 Signal logic (default — exits early with `success: false` and a reason on skip):
-1. **Vol index ≥ cutoff** (VXN ≥ 35 for NDX/QQQ, else VIX ≥ 20) → no trade (`signal: "VIX-SKIP"`)
-2. **EMA9 last crossed above EMA21** → `bull_put` (`signal: "EMA-Up"`)
-3. **EMA9 last crossed below EMA21** → `bear_call` (`signal: "EMA-Dn"`)
+1. **No vol reading** (intraday or prior-day missing) → no trade (`signal: "VOL-UNAVAILABLE"`)
+2. **Vol index ≥ cutoff** (VXN ≥ 35 for NDX/QQQ, else VIX ≥ 20, either reading) → no trade (`signal: "VIX-SKIP"`)
+3. **EMA9 last crossed above EMA21** → `bull_put` (`signal: "EMA-Up"`)
+4. **EMA9 last crossed below EMA21** → `bear_call` (`signal: "EMA-Dn"`)
 
 Optional confirmation gates (both **off** by default):
 - `--rr-gate` — an EMA-down becomes a Bear Call only if **both the 9:30 and 10:00
